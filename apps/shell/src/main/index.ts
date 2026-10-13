@@ -604,6 +604,7 @@ function currentAiPanelPrefs(): AiPanelPrefs {
     customFontSize: saved.aiPanelCustomFontSize,
     spellcheck: saved.aiPanelSpellcheck,
     openInNewDocs: saved.aiPanelOpenInNewDocs,
+    showAiSidebar: saved.aiPanelShowSidebar,
   })
   return cachedAiPanelPrefs
 }
@@ -4505,6 +4506,7 @@ function registerHomeIpc(): void {
       customFontSize: 'customFontSize' in raw ? raw.customFontSize : prev.customFontSize,
       spellcheck: 'spellcheck' in raw ? raw.spellcheck : prev.spellcheck,
       openInNewDocs: 'openInNewDocs' in raw ? raw.openInNewDocs : prev.openInNewDocs,
+      showAiSidebar: 'showAiSidebar' in raw ? raw.showAiSidebar : prev.showAiSidebar,
     })
     if (sameAiPanelPrefs(next, prev)) return prev
     cachedAiPanelPrefs = next
@@ -4514,6 +4516,7 @@ function registerHomeIpc(): void {
       aiPanelCustomFontSize: next.customFontSize,
       aiPanelSpellcheck: next.spellcheck,
       aiPanelOpenInNewDocs: next.openInNewDocs,
+      aiPanelShowSidebar: next.showAiSidebar,
     })
     for (const wc of webContents.getAllWebContents()) wc.send('app:ai-panel-prefs-changed', next)
     return next
