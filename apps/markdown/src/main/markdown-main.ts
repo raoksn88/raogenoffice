@@ -53,12 +53,15 @@ import { createMarkdownConversionSession, writeMarkdownConversion } from './conv
 import { MARKDOWN_CHANNELS, MAX_PASTED_IMAGE_BYTES } from '../shared/ipc'
 import type {
   ImageHostConfig,
+  WikiBacklink,
+  WikiGraph,
   WikiLinkResolveRequest,
   WikiLinkResolved,
   WikiNoteEntry,
 } from '../shared/ipc'
 import { nodeFs, resolveWikiLinks } from './wiki-resolve'
 import { listWikiNotes } from './wiki-notes'
+import { nodeVaultFs, wikiBacklinks, wikiGraph } from './wiki-index'
 import { rememberWikiFragment, takeWikiFragment } from './wiki-fragment'
 import { isImageHostUsable, normalizeImageHostConfig, uploadImageToHost } from './image-host'
 import {
@@ -798,6 +801,16 @@ function registerMarkdownIpc(): void {
 
   ipcMain.handle(MARKDOWN_CHANNELS.listWikiNotes, (): WikiNoteEntry[] =>
     listWikiNotes(configuredDefaultSaveDir(app), nodeFs()),
+  )
+
+  ipcMain.handle(MARKDOWN_CHANNELS.wikiBacklinks, (_e, path: unknown): WikiBacklink[] =>
+    typeof path === 'string'
+      ? wikiBacklinks(configuredDefaultSaveDir(app), path, nodeVaultFs())
+      : [],
+  )
+
+  ipcMain.handle(MARKDOWN_CHANNELS.wikiGraph, (): WikiGraph =>
+    wikiGraph(configuredDefaultSaveDir(app), nodeVaultFs()),
   )
 
   ipcMain.handle(
