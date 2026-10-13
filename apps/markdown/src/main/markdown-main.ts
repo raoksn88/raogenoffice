@@ -51,8 +51,14 @@ import {
 } from './asset-lifecycle'
 import { createMarkdownConversionSession, writeMarkdownConversion } from './conversion-lifecycle'
 import { MARKDOWN_CHANNELS, MAX_PASTED_IMAGE_BYTES } from '../shared/ipc'
-import type { ImageHostConfig, WikiLinkResolveRequest, WikiLinkResolved } from '../shared/ipc'
-import { resolveWikiLinks } from './wiki-resolve'
+import type {
+  ImageHostConfig,
+  WikiLinkResolveRequest,
+  WikiLinkResolved,
+  WikiNoteEntry,
+} from '../shared/ipc'
+import { nodeFs, resolveWikiLinks } from './wiki-resolve'
+import { listWikiNotes } from './wiki-notes'
 import { rememberWikiFragment, takeWikiFragment } from './wiki-fragment'
 import { isImageHostUsable, normalizeImageHostConfig, uploadImageToHost } from './image-host'
 import {
@@ -788,6 +794,10 @@ function registerMarkdownIpc(): void {
 
   ipcMain.handle(MARKDOWN_CHANNELS.takeWikiFragment, (_e, path: unknown): string =>
     typeof path === 'string' ? takeWikiFragment(path) : '',
+  )
+
+  ipcMain.handle(MARKDOWN_CHANNELS.listWikiNotes, (): WikiNoteEntry[] =>
+    listWikiNotes(configuredDefaultSaveDir(app), nodeFs()),
   )
 
   ipcMain.handle(
