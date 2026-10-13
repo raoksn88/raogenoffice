@@ -18,10 +18,12 @@ import {
   BrowserWindow,
   Menu,
   app,
+  clipboard,
   dialog,
   ipcMain,
   nativeImage,
   nativeTheme,
+  screen,
   session,
   shell,
   webContents,
@@ -345,6 +347,10 @@ import { createFileViaCli } from './mcp/headless-cli'
 import { sanitizeFileBase } from './mcp/tools/document-tools'
 import { runHeadlessExport, type HeadlessExporters } from './headless-export'
 import { TabManager } from './tab-manager'
+import { tabMenuTemplate, tabMenuWords, type TabMenuActions, isProgramFile } from './tab-menu'
+import { runTabDocumentAction, type TabDocumentAction } from './tab-document-actions'
+import { duplicateDocumentFile } from './tab-duplicate'
+import { closeTabsInOrder, createRecentlyClosedTracker } from './tab-lifecycle'
 import { installShellCloseGuard } from './window-close-guard'
 import {
   activateDetached,
@@ -3559,6 +3565,7 @@ function createShellWindow(): void {
     () => currentUiScale,
   )
   tabManager = manager
+  manager.setClosedListener((closed) => recentlyClosed.push(closed))
 
   // Docking: a detached window dragged over this window's tab strip hands its
   // document back. The strip reports the insertion slot for each preview
@@ -5085,6 +5092,80 @@ function activeHtmlTarget() {
   return activeEditorTarget('html', () => tabManager?.activeHtmlTab())
 }
 
+/** files of tabs that were closed, newest last, so "Reopen closed tab" can bring them back */
+const recentlyClosed = createRecentlyClosedTracker()
+
+/** The shell's side of every entry of the tab menu (see tab-menu.ts for what is offered). */
+function tabMenuActions(): TabMenuActions {
+  const documentAction = (id: string, action: TabDocumentAction) => {
+    if (!tabManager) return
+    runTabDocumentAction(
+      {
+        tabs: tabManager,
+        savePdf: (contents) => {
+          void flushPdfSave(contents)
+        },
+        savePdfAs: (target) => {
+          void savePdfAs(target)
+        },
+        printPdf: sendPdfPrintRequest,
+        saveMarkdown: (contents, mode) => {
+          void requestMarkdownSave(contents, mode)
+        },
+        printMarkdown: sendMarkdownPrintRequest,
+        saveHtml: (contents, mode) => {
+          void requestHtmlSave(contents, mode)
+        },
+        printHtml: sendHtmlPrintRequest,
+      },
+      id,
+      action,
+    )
+  }
+  return {
+    save: (id) => documentAction(id, 'save'),
+    saveAs: (id) => documentAction(id, 'saveAs'),
+    print: (id) => documentAction(id, 'print'),
+    openInNewWindow: (id) => detachTabToWindow(id),
+    // two windows side by side, each on its own half of the screen the tab is on
+    splitBeside: (id) => {
+      if (!tabManager || !shellWindow) return
+      const record = tabManager.detachTab(id)
+      if (!record) return
+      const win = createDetachedEditorWindow({ ...record, applyMenuFor })
+      const area = screen.getDisplayMatching(shellWindow.getBounds()).workArea
+      const half = Math.floor(area.width / 2)
+      if (shellWindow.isMaximized()) shellWindow.unmaximize()
+      if (shellWindow.isFullScreen()) shellWindow.setFullScreen(false)
+      shellWindow.setBounds({ x: area.x, y: area.y, width: half, height: area.height })
+      win.setBounds({ x: area.x + half, y: area.y, width: area.width - half, height: area.height })
+      win.focus()
+    },
+    rename: (id) => {
+      if (shellWindow && !shellWindow.isDestroyed())
+        shellWindow.webContents.send(TABS_CHANNELS.startRename, id)
+    },
+    duplicate: (path) => {
+      void duplicateDocumentFile(path, { copySuffix: tm('copySuffix') }).then(
+        (target) => {
+          recordRecentFile(target)
+          openDocumentPath(target)
+        },
+        (error) => console.warn('[tabs] duplicate failed:', error),
+      )
+    },
+    copyText: (text) => clipboard.writeText(text),
+    reveal: (path) => shell.showItemInFolder(path),
+    openDefault: (path) => {
+      // a document tab is a document, never a program; keep it that way for a renamed one
+      if (!isProgramFile(path)) void shell.openPath(path)
+    },
+    move: (id, toIndex) => tabManager?.reorderTab(id, toIndex),
+    closeTabs: (ids) => void (tabManager && closeTabsInOrder(tabManager, ids)),
+    reopenClosed: () => recentlyClosed.reopenNext(openDocumentPath, existsSync),
+  }
+}
+
 function registerTabsIpc(): void {
   ipcMain.on(TABS_CHANNELS.chromePressed, (event) => broadcastChromePressed(event.sender))
   ipcMain.handle(TABS_CHANNELS.list, () => tabManager?.list() ?? [])
@@ -5156,20 +5237,15 @@ function registerTabsIpc(): void {
     if (!tabManager || !shellWindow || typeof id !== 'string') return
     const tab = tabManager.list().find((t) => t.id === id)
     if (!tab || tab.kind === 'home') return
-    const template: MenuItemConstructorOptions[] = []
-    // every document tab except a chrome-free Present tab (a live preview of
-    // another tab's document — it has nothing of its own to move)
-    if (tabManager.canDetachTab(id)) {
-      template.push({
-        label: tm('menuOpenInNewWindow'),
-        click: () => detachTabToWindow(id),
-      })
-      template.push({ type: 'separator' })
-    }
-    template.push({
-      label: tm('menuClose'),
-      enabled: tab.closable,
-      click: () => void tabManager?.closeTab(id),
+    const template = tabMenuTemplate({
+      tab,
+      tabs: tabManager.list(),
+      canDetach: tabManager.canDetachTab(id),
+      fileExists: !!tab.filePath && existsSync(tab.filePath),
+      canReopen: recentlyClosed.getEntries().length > 0,
+      words: tabMenuWords(currentLang()),
+      labels: { openInNewWindow: tm('menuOpenInNewWindow'), close: tm('menuClose') },
+      actions: tabMenuActions(),
     })
     Menu.buildFromTemplate(template).popup({
       window: shellWindow,
@@ -5573,8 +5649,7 @@ function buildHtmlMenu(): void {
     waiter/target grant or clears its autosave pause early */
 let savingPdfAs = false
 
-async function savePdfAs(): Promise<void> {
-  const tab = activePdfTarget()
+async function savePdfAs(tab = activePdfTarget()): Promise<void> {
   const host = pdfHostWindow(tab)
   if (!tab?.filePath || !host || savingPdfAs) return
   savingPdfAs = true
