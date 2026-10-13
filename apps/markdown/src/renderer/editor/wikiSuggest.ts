@@ -128,6 +128,8 @@ export const WikiSuggest = Extension.create<WikiSuggestOptions>({
 
   addProseMirrorPlugins() {
     const getController = () => this.options.controller
+    // the key-down props carry no items; the render callbacks last saw them
+    let visibleItems: WikiNoteEntry[] = []
     const toState = (props: SuggestionProps<WikiNoteEntry>): WikiSuggestState => ({
       items: props.items,
       clientRect: props.clientRect?.() ?? null,
@@ -163,13 +165,22 @@ export const WikiSuggest = Extension.create<WikiSuggestOptions>({
           insertCompletion(editor, range, completionFor(item, query, embed), embed)
         },
         render: () => ({
-          onStart: (props) => getController()?.onOpen(toState(props)),
-          onUpdate: (props) => getController()?.onUpdate(toState(props)),
+          onStart: (props) => {
+            visibleItems = props.items
+            getController()?.onOpen(toState(props))
+          },
+          onUpdate: (props) => {
+            visibleItems = props.items
+            getController()?.onUpdate(toState(props))
+          },
           onKeyDown: (props) => {
-            if (props.items.length === 0) return false
+            if (visibleItems.length === 0) return false
             return getController()?.onKeyDown(props.event) ?? false
           },
-          onExit: () => getController()?.onClose(),
+          onExit: () => {
+            visibleItems = []
+            getController()?.onClose()
+          },
         }),
       }),
     ]
