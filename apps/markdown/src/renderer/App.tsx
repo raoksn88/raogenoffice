@@ -21,7 +21,7 @@ import type { Editor } from '@tiptap/core'
 import { TextSelection } from '@tiptap/pm/state'
 import { exportImages } from './export/imageExport'
 import type { StringKey } from './i18n/locale'
-import { useI18n } from './i18n/locale'
+import { t as translate, useI18n } from './i18n/locale'
 import {
   buildFrontmatterRaw,
   frontmatterInner,
@@ -40,6 +40,8 @@ import { tiptapFindTarget } from './editor/findTarget'
 import { collectOutline, type OutlineItem } from './editor/outline'
 import { buildSlashItems } from './editor/slashCommand'
 import type { SlashController, SlashMenuState } from './editor/slashCommand'
+import { wikiFragmentPosition } from './editor/wikilink'
+import type { WikiSuggestController, WikiSuggestState } from './editor/wikiSuggest'
 import { dirOf, setImageBaseDir, VIEW_IMAGE_EVENT } from './editor/localImage'
 import { Ribbon } from './components/Ribbon'
 import type { MarkdownTheme } from '../shared/markdown-theme'
@@ -48,6 +50,9 @@ import { RedactMenu } from './components/RedactMenu'
 import { OutlinePane } from './components/OutlinePane'
 import { SourcePane } from './components/SourcePane'
 import { SlashMenu, type SlashMenuHandle } from './components/SlashMenu'
+import { WikiSuggestMenu, type WikiSuggestMenuHandle } from './components/WikiSuggestMenu'
+import { BacklinksPane } from './components/BacklinksPane'
+import { GraphView } from './components/GraphView'
 import { ToastHost } from './components/toast'
 import { showToast } from './components/toast-bus'
 import { TableMenu } from './components/TableMenu'
@@ -155,6 +160,7 @@ export default function App() {
     params?: Record<string, string | number>
   } | null>(null)
   const [slashState, setSlashState] = useState<SlashMenuState | null>(null)
+  const [wikiSuggestState, setWikiSuggestState] = useState<WikiSuggestState | null>(null)
   const [fmOpen, setFmOpen] = useState(false)
   const [fmText, setFmText] = useState('')
   // Persisted so a closed AI panel stays closed on next launch (docs/slides parity)
@@ -171,6 +177,8 @@ export default function App() {
   const [outlineWidth, setOutlineWidth] = useState(
     () => Number(localStorage.getItem('mdapp.outlineWidth')) || undefined,
   )
+  const [backlinksOpen, setBacklinksOpen] = useState(false)
+  const [graphOpen, setGraphOpen] = useState(false)
   const [sourceViewOpen, setSourceViewOpen] = useState(false)
   const [sourceText, setSourceText] = useState('')
   const sourceViewOpenRef = useRef(false)
@@ -230,6 +238,7 @@ export default function App() {
   }
   const filePathRef = useRef<string | null>(null)
   const slashMenuRef = useRef<SlashMenuHandle>(null)
+  const wikiSuggestMenuRef = useRef<WikiSuggestMenuHandle>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
 
   const zoomOut = useCallback(
@@ -259,6 +268,28 @@ export default function App() {
     })()
   }, [])
 
+  /**
+   * Land on the heading a wiki link pointed at. The fragment waited in main
+   * for this path — the shell activates an open tab without waking anything —
+   * so it is taken here, once the note is actually on screen.
+   */
+  const jumpToWikiFragment = useCallback((path: string): void => {
+    const current = editorRef.current
+    if (!current) return
+    // The browser test harness stubs markdownApi without the Electron-only
+    // wiki channels; a missing API here means nothing to jump to, not a
+    // failed load.
+    if (typeof window.markdownApi.takeWikiFragment !== 'function') return
+    void window.markdownApi.takeWikiFragment(path).then((fragment) => {
+      if (!fragment || filePathRef.current !== path) return
+      const pos = wikiFragmentPosition(current.state.doc, fragment)
+      if (pos === null) return
+      const selection = TextSelection.near(current.state.doc.resolve(pos))
+      current.view.dispatch(current.state.tr.setSelection(selection).scrollIntoView())
+      current.view.focus()
+    })
+  }, [])
+
   const extensions = useMemo(() => {
     const controller: SlashController = {
       onOpen: setSlashState,
@@ -266,12 +297,31 @@ export default function App() {
       onKeyDown: (event) => slashMenuRef.current?.handleKey(event) ?? false,
       onClose: () => setSlashState(null),
     }
+    const wikiSuggestController: WikiSuggestController = {
+      onOpen: setWikiSuggestState,
+      onUpdate: setWikiSuggestState,
+      onKeyDown: (event) => wikiSuggestMenuRef.current?.handleKey(event) ?? false,
+      onClose: () => setWikiSuggestState(null),
+    }
     return buildExtensions({
       slashController: controller,
       slashItems: () =>
         buildSlashItems({ insertImage: filePathRef.current ? insertImage : undefined }),
+      wikiSuggestController,
+      wikiLink: {
+        getDocumentPath: () => filePathRef.current ?? '',
+        onOpen: (path, fragment) => {
+          void window.markdownApi.rememberWikiFragment(path, fragment)
+          void window.markdownApi.openSourcePath(path)
+          // a link into the note already on screen opens no tab; jump here
+          if (filePathRef.current === path) jumpToWikiFragment(path)
+        },
+        // the module-level `t`, not the hook's: this memo holds the closure for
+        // the life of the editor, and the hook's `t` is a new function each render
+        onUnresolved: (target) => showToast(translate('wikiLinkUnresolved', { target }), 'error'),
+      },
     })
-  }, [insertImage])
+  }, [insertImage, jumpToWikiFragment])
 
   const editor = useEditor({
     extensions,
@@ -367,6 +417,7 @@ export default function App() {
           const raw = await window.markdownApi.readFile(path)
           if (cancelled) return
           loadFromPath(path, raw)
+          jumpToWikiFragment(path)
         } else {
           envelopeRef.current = { ...EMPTY_ENVELOPE }
         }
@@ -383,7 +434,7 @@ export default function App() {
     return () => {
       cancelled = true
     }
-  }, [editor, roundTripEnabled, loadFromPath])
+  }, [editor, roundTripEnabled, loadFromPath, jumpToWikiFragment])
 
   const onFrontmatterChange = useCallback(
     (inner: string) => {
@@ -1115,6 +1166,9 @@ export default function App() {
         outlineOpen={outlineOpen}
         onToggleOutline={() => setOutlineOpen((v) => !v)}
         hasOutline={outlineItems.length > 0}
+        backlinksOpen={backlinksOpen}
+        onToggleBacklinks={() => setBacklinksOpen((v) => !v)}
+        onOpenGraph={() => setGraphOpen(true)}
         spellcheck={spellcheck}
         onToggleSpellcheck={() => setSpellcheck((v) => !v)}
         sourceMode={sourceMode}
@@ -1166,6 +1220,12 @@ export default function App() {
             onJump={jumpToOutline}
             width={outlineWidth}
             onResize={setOutlineWidth}
+          />
+        )}
+        {backlinksOpen && !sourceMode && (
+          <BacklinksPane
+            path={filePath}
+            onOpen={(path) => void window.markdownApi.openSourcePath(path)}
           />
         )}
         <div className="app-content">
@@ -1266,8 +1326,25 @@ export default function App() {
       {!sourceMode && (
         <SlashMenu ref={slashMenuRef} state={slashState} onDismiss={() => setSlashState(null)} />
       )}
+      {!sourceMode && (
+        <WikiSuggestMenu
+          ref={wikiSuggestMenuRef}
+          state={wikiSuggestState}
+          onDismiss={() => setWikiSuggestState(null)}
+        />
+      )}
       <RedactMenu editor={editor} enabled={redactEnabled} />
       <ToastHost />
+      {graphOpen && (
+        <GraphView
+          current={filePath}
+          onClose={() => setGraphOpen(false)}
+          onOpen={(path) => {
+            setGraphOpen(false)
+            void window.markdownApi.openSourcePath(path)
+          }}
+        />
+      )}
       {imageHostOpen && (
         <ImageHostDialog onClose={() => setImageHostOpen(false)} onSaved={() => {}} />
       )}
